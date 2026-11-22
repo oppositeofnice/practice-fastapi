@@ -1,0 +1,351 @@
+ALEMBIC NOTLARI
+================
+
+1. ALEMBIC NEDİR, NEDEN VAR?
+----------------------------
+Alembic, veritabanı şemasının (tablolar, sütunlar, foreign key'ler) sürüm
+kontrolü gibi düşünülebilir. Git kodun geçmişini tutar, Alembic de
+veritabanının geçmişini tutar.
+
+Sorun şu: SQLAlchemy'de bir modele yeni sütun ekleyince Base.metadata.create_all()
+mevcut tabloyu DEĞİŞTİRMEZ. Sadece olmayan tabloları oluşturur. Tabloyu silip
+yeniden oluşturmak ise veriyi siler. Alembic, "şu tabloya şu sütunu ekle" gibi
+küçük adımları (migration) sırayla uygular ve geri alabilir.
+
+Her migration bir Python dosyasıdır ve alembic/versions/ klasöründe durur.
+İçinde iki fonksiyon var:
+  - upgrade()   -> değişikliği uygular
+  - downgrade() -> değişikliği geri alır
+
+Önemli: Alembic, SQLAlchemy'nin üstünde çalışır. Veritabanına bağlanmak için
+SQLAlchemy kullanır, modellerini SQLAlchemy ile yazarsın.
+
+
+2. KURULUM
+----------
+pip install alembic
+
+Proje kökünde (alembic.ini'nin duracağı yerde):
+    alembic init alembic
+
+Bu komut şunları oluşturur:
+    alembic.ini           -> ayar dosyası (veritabanı adresi vs.)
+    alembic/env.py        -> Alembic'in veritabanına nasıl bağlanacağını belirler
+    alembic/versions/     -> migration dosyaları buraya gelir
+
+Bütün alembic komutlarını alembic.ini'nin olduğu klasörde çalıştır.
+("No config file 'alembic.ini' found" hatası genelde yanlış klasörden gelir.)
+
+
+3. env.py AYARI (EN KRİTİK KISIM)
+---------------------------------
+İki şey şart:
+
+a) Modellerinin Base'ini ver ve modelleri import et:
+
+    from app.models import Base          # kendi proje yapına göre
+    target_metadata = Base.metadata
+
+   Modeller import edilmezse Alembic hiçbir tablo görmez ve autogenerate
+   BOŞ migration üretir.
+
+b) Veritabanı adresini ayarlardan (.env) oku, alembic.ini'ye şifre yazma:
+
+    from app.config import settings
+    config.set_main_option(
+        "sqlalchemy.url",
+        f"postgresql+psycopg2://{settings.database_username}:{settings.database_password}"
+        f"@{settings.database_hostname}:{settings.database_port}/{settings.database_name}"
+    )
+
+   Not: Şifrede % karakteri varsa, alembic.ini kendi formatı yüzünden bunu
+   %% yazmak ister (şifre.replace("%", "%%")).
+
+
+4. TEMEL KOMUTLAR
+-----------------
+Migration oluşturma:
+    alembic revision -m "aciklama"                     # boş migration, içini elle yazarsın
+    alembic revision --autogenerate -m "aciklama"      # modelden fark çıkarıp kendisi yazar
+
+Uygulama:
+    alembic upgrade head        # en sona kadar hepsini uygula
+    alembic upgrade +1          # bir sonraki migration'a çık
+    alembic upgrade <id>        # belirli bir revision'a çık (ilk 4-5 karakter yeter)
+
+Geri alma:
+    alembic downgrade -1        # bir önceye dön
+    alembic downgrade <id>      # belirli revision'a dön
+    alembic downgrade base      # her şeyi geri al (tüm tablolar gider!)
+
+Durum bakma:
+    alembic current             # veritabanı şu an hangi revision'da
+    alembic heads               # zincirin en uç revision'ı/revision'ları
+    alembic history             # tüm zincir
+    alembic history --verbose   # id, Revises, tarih gibi detaylarla
+    alembic show <id>           # tek bir revision'ın detayı
+
+DİKKAT: "alembic upgrade+1" (boşluksuz) çalışmaz. Alembic bunu tek kelime
+sanıp "invalid choice: 'upgrade+1'" der. Doğrusu: alembic upgrade +1
+"invalid choice" hatası = komut adı yanlış yazılmış demektir.
+
+
+5. REVISION ZİNCİRİ NASIL ÇALIŞIR?
+----------------------------------
+Her migration dosyasının içinde:
+    revision = 'aa1e'          # bu migration'ın kimliği
+    down_revision = '7b06'     # bundan bir önceki migration (parent)
+
+Bu şekilde bağlı liste gibi bir zincir oluşur:
+
+    <base> -> afe1 -> 7b06 -> aa1e
+                              (head)
+
+- head   : zincirin en sonu (en yeni migration)
+- current: veritabanının şu an bulunduğu yer. head'den geride olabilir.
+
+Veritabanında alembic_version adında tek satırlık bir tablo vardır ve current
+revision id'sini orada tutar.
+
+Örnek: current = afe1, head = aa1e olsun (7b06 oluşturuldu ama uygulanmadı).
+    alembic upgrade +1     -> 7b06'ya çıkar
+    alembic upgrade +1     -> aa1e'ye çıkar
+    alembic upgrade head   -> direkt aa1e'ye çıkar (aradakiler sırayla uygulanır)
+    alembic upgrade 7b06   -> sadece 7b06'ya kadar
+
+
+6. AUTOGENERATE
+---------------
+    alembic revision --autogenerate -m "add votes table"
+
+Alembic ne yapar:
+  1. Veritabanına bağlanır, mevcut şemaya bakar.
+  2. target_metadata'daki (yani modellerindeki) şema ile karşılaştırır.
+  3. Farkları upgrade() ve downgrade() içine yazar.
+
+Sonra dosyayı AÇ ve OKU, ardından alembic upgrade head ile uygula.
+
+Önemli kural: autogenerate'den önce veritabanı en güncel revision'da olmalı.
+Yoksa "Target database is not up to date" hatası alırsın. Önce:
+    alembic upgrade head
+
+Autogenerate'in ÇOK İYİ yakaladıkları:
+  - yeni tablo / silinen tablo
+  - yeni sütun / silinen sütun
+  - sütun tipi veya nullable değişikliği (çoğu durumda)
+  - foreign key ve index ekleme/silme
+
+Autogenerate'in YAKALAYAMADIKLARI / yanlış yaptıkları:
+  - Tablo veya sütun yeniden adlandırma: "eskiyi sil + yeniyi ekle" olarak
+    görür. Bu VERİ KAYBINA yol açar. Elle op.alter_column / op.rename_table yaz.
+  - Bazı constraint ve server_default değişiklikleri (varsayılan olarak
+    karşılaştırılmayabilir).
+  - Modeli env.py'ye import etmediysen hiçbir şey görmez, boş dosya çıkar.
+
+Altın kural: Üretilen migration'ı çalıştırmadan önce mutlaka oku.
+
+
+7. ELLE MIGRATION YAZMA (op FONKSİYONLARI)
+------------------------------------------
+Migration içinde "op" nesnesi kullanılır:
+
+    from alembic import op
+    import sqlalchemy as sa
+
+Tablo oluştur:
+    op.create_table(
+        'votes',
+        sa.Column('post_id', sa.Integer(), nullable=False, primary_key=True),
+        sa.Column('owner_id', sa.Integer(), nullable=False, primary_key=True),
+    )
+    # iki sütunda birden primary_key=True -> bileşik primary key
+    # (aynı kullanıcı aynı posta iki kez oy veremez)
+
+Tablo sil:
+    op.drop_table('votes')
+
+Sütun ekle / sil:
+    op.add_column('posts', sa.Column('content', sa.String(), nullable=False))
+    op.drop_column('posts', 'content')
+
+Foreign key ekle:
+    op.create_foreign_key(
+        'votes_posts_fk',            # constraint'in adı (sonra silmek için lazım)
+        source_table='votes',        # FK'nin TUTULDUĞU tablo
+        referent_table='posts',      # İŞARET ETTİĞİ tablo
+        local_cols=['post_id'],      # votes içindeki sütun
+        remote_cols=['id'],          # posts içindeki sütun
+        ondelete='CASCADE',
+    )
+    Hatırlatma: FK, bağlantıyı tutan tabloda tanımlanır ve diğerini işaret eder.
+    (votes -> posts, votes -> users. Tersi değil.)
+
+Constraint sil:
+    op.drop_constraint('votes_posts_fk', 'votes', type_='foreignkey')
+    #                   ^constraint adı   ^tablo adı   (SIRA ÖNEMLİ!)
+
+Sütunu değiştir / yeniden adlandır:
+    op.alter_column('posts', 'title', new_column_name='baslik')
+    op.alter_column('posts', 'views', type_=sa.BigInteger(), nullable=True)
+
+Her upgrade'in karşılığı downgrade'de TERS SIRAYLA yazılır:
+    upgrade:   tablo oluştur -> FK ekle
+    downgrade: FK sil -> tabloyu sil
+(Pratikte drop_table, tablodaki FK'leri de zaten siler.)
+
+Votes örneğinin tamamı:
+
+    def upgrade() -> None:
+        op.create_table('votes',
+            sa.Column('post_id', sa.Integer(), nullable=False, primary_key=True),
+            sa.Column('owner_id', sa.Integer(), nullable=False, primary_key=True))
+        op.create_foreign_key('votes_posts_fk', source_table='votes',
+            referent_table='posts', local_cols=['post_id'],
+            remote_cols=['id'], ondelete='CASCADE')
+        op.create_foreign_key('votes_users_fk', source_table='votes',
+            referent_table='users', local_cols=['owner_id'],
+            remote_cols=['id'], ondelete='CASCADE')
+
+    def downgrade() -> None:
+        op.drop_constraint('votes_posts_fk', 'votes', type_='foreignkey')
+        op.drop_constraint('votes_users_fk', 'votes', type_='foreignkey')
+        op.drop_table('votes')
+
+Test: upgrade ve downgrade'i sırayla dene.
+    alembic upgrade +1
+    alembic downgrade -1
+    alembic upgrade +1
+
+
+8. SQLALCHEMY'DE MODEL YAZMA (ALEMBIC'İN OKUDUĞU YER)
+-----------------------------------------------------
+Alembic modellerine bakıp şemayı çıkarır, o yüzden modeller doğru yazılmalı.
+
+    from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, text
+    from sqlalchemy.types import TIMESTAMP
+    from sqlalchemy.orm import relationship
+    from .database import Base
+
+    class User(Base):
+        __tablename__ = "users"
+        id = Column(Integer, primary_key=True, nullable=False)
+        email = Column(String, nullable=False, unique=True)
+        password = Column(String, nullable=False)
+        created_at = Column(TIMESTAMP(timezone=True), nullable=False,
+                            server_default=text("now()"))
+
+    class Post(Base):
+        __tablename__ = "posts"
+        id = Column(Integer, primary_key=True, nullable=False)
+        title = Column(String, nullable=False)
+        content = Column(String, nullable=False)
+        published = Column(Boolean, server_default="TRUE", nullable=False)
+        created_at = Column(TIMESTAMP(timezone=True), nullable=False,
+                            server_default=text("now()"))
+        owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                          nullable=False)
+        owner = relationship("User")     # Python tarafında post.owner diye erişim
+
+    class Vote(Base):
+        __tablename__ = "votes"
+        post_id = Column(Integer, ForeignKey("posts.id", ondelete="CASCADE"),
+                         primary_key=True)
+        owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                          primary_key=True)
+
+Önemli ayrımlar:
+  - ForeignKey(...)    -> VERİTABANINDA gerçek kısıt (Alembic bunu görür)
+  - relationship(...)  -> sadece PYTHON tarafında kolaylık, veritabanında
+                          sütun oluşturmaz
+  - server_default     -> değeri veritabanı atar (migration'a yansır)
+  - default            -> değeri Python atar (migration'a yansımaz)
+  - ondelete="CASCADE" -> ana kayıt silinince bağlı kayıtlar da silinir
+
+Sorgu örnekleri (Session ile):
+    db.query(models.Post).filter(models.Post.id == 1).first()
+    db.query(models.Post).filter(models.Post.title.contains("fastapi")).limit(10).offset(0).all()
+
+Oy sayısıyla birlikte post (LEFT JOIN + GROUP BY):
+    from sqlalchemy import func
+    results = (
+        db.query(models.Post, func.count(models.Vote.post_id).label("votes"))
+        .join(models.Vote, models.Vote.post_id == models.Post.id, isouter=True)
+        .group_by(models.Post.id)
+        .all()
+    )
+    - isouter=True  -> LEFT JOIN (oy almamış postlar da gelir, sayı 0)
+    - label("votes") -> Row objesinde attribute adı olur; Pydantic şemasındaki
+                        alan adıyla aynı olmalı
+    - SQLAlchemy 2.x'te sonuç Row objesidir, response_model + from_attributes
+      ile Pydantic bunu okur.
+
+
+9. GÜNLÜK İŞ AKIŞI
+------------------
+Modelde değişiklik yaptığında:
+
+    1. models.py'yi değiştir
+    2. alembic upgrade head                                (db güncel olsun)
+    3. alembic revision --autogenerate -m "ne degisti"
+    4. Üretilen dosyayı aç, oku, gerekirse düzelt
+    5. alembic upgrade head
+    6. alembic current                                     (kontrol)
+
+Üretilen migration'ı uygulamadan arka arkaya yeni migration oluşturma. Yeni
+migration, önceki uygulanmamış değişiklikleri de içerebilir ve aynı tabloyu/sütunu
+iki kez eklemeye çalışıp hata verir.
+
+
+10. SIK KARŞILAŞILAN HATALAR
+----------------------------
+"invalid choice: 'upgrade+1'"
+    -> Komutla +1 arasında boşluk yok. "alembic upgrade +1" yaz.
+
+"No config file 'alembic.ini' found"
+    -> Komutu yanlış klasörde çalıştırıyorsun. alembic.ini'nin olduğu yere git.
+
+"Multiple head revisions are present"
+    -> Zincirde iki dal oluşmuş (genelde bir migration dosyası silinip yenisi
+       oluşturulunca ya da aynı down_revision'dan iki dosya türeyince).
+       alembic heads ile bak.
+       Çözüm: alembic merge heads -m "merge"
+       Ya da bir dosyanın down_revision değerini düzelt, zinciri düz yap.
+
+"Can't locate revision identified by 'xxxx'"
+    -> alembic_version tablosundaki id, versions/ klasöründe yok. Dosya silinmiş
+       ya da veritabanı başka bir projeye ait olabilir.
+
+"Target database is not up to date"
+    -> Autogenerate'den önce alembic upgrade head çalıştır.
+
+Autogenerate boş migration üretiyor (pass pass)
+    -> env.py'de target_metadata = Base.metadata eksik ya da modeller import
+       edilmemiş. Ya da veritabanı zaten modele uyuyor.
+
+"relation 'votes' already exists"
+    -> Tablo zaten var (create_all ile oluşturulmuş olabilir). İki yol:
+       a) Tabloyu silip migration'ı çalıştır.
+       b) Zaten doğruysa migration'ı çalıştırmadan işaretle:
+          alembic stamp head
+       (stamp, veritabanında hiçbir şey değiştirmez, sadece alembic_version
+       tablosuna "şu revision'dayım" yazar.)
+
+password authentication failed / could not connect
+    -> env.py'deki bağlantı adresi yanlış ya da .env okunmuyor.
+
+Downgrade'de drop_constraint hatası
+    -> İmza: drop_constraint(constraint_adi, tablo_adi). Sırayı karıştırma.
+
+
+11. ALTIN KURALLAR
+------------------
+- Uygulanmış bir migration dosyasını sonradan DEĞİŞTİRME. Yeni bir migration
+  yaz. (Takım çalışmasında başkasının veritabanı bozulur.)
+- Migration dosyalarını git'e ekle, silme.
+- Autogenerate'in çıktısını her zaman oku.
+- Her upgrade'in downgrade'i de çalışmalı. Test et.
+- Canlı veride tehlikeli işlemlerden (sütun silme, yeniden adlandırma) önce yedek al.
+- Şemayı sadece Alembic ile değiştir. Modelde değişiklik yapıp elle SQL
+  çalıştırırsan model ile veritabanı uyuşmaz.
+- Alembic kullanmaya başlayınca Base.metadata.create_all() satırını kaldır;
+  tabloları Alembic oluştursun.
